@@ -113,23 +113,27 @@ func (p *PTPEventManager) ParsePTP4l(processName, configName, profileName, outpu
 		// holdover timeout, always put only master offset from ptp4l to HOLDOVER,when this goes to FREERUN
 		// make any slave interface master offset to FREERUN
 		// Only if master (slave port ) offset was reported by ptp4l
-		if syncState != "" && syncState != ptpStats[master].LastSyncState() && syncState == ptp.HOLDOVER {
-			// Put master in HOLDOVER state
+		if syncState == ptp.HOLDOVER {
 			ptpStats[master].SetRole(types.FAULTY) // update slave port as faulty
-			log.Infof("master process name %s and masteroffsetsource %s", ptpStats[master].ProcessName(), masterOffsetSource)
 			if ptpStats[master].ProcessName() == masterOffsetSource {
 				alias := ptpStats[master].Alias()
-				masterResource := fmt.Sprintf("%s/%s", alias, MasterClockType)
-				ptpStats[master].SetLastSyncState(syncState)
-				p.PublishEvent(syncState, ptpStats[master].LastOffset(), masterResource, ptp.PtpStateChange)
 				UpdateSyncStateMetrics(ptpStats[master].ProcessName(), alias, syncState)
-				if ptpOpts, ok := p.PtpConfigMapUpdates.PtpProcessOpts[profileName]; ok && ptpOpts != nil {
-					p.maybePublishOSClockSyncStateChangeEvent(ptpOpts, configName, profileName)
-					threshold := p.PtpThreshold(profileName, true)
-					if p.mock {
-						log.Infof("mock holdover is set to %s", ptpStats[MasterClockType].Alias())
-					} else {
-						go handleHoldOverState(p, ptpOpts, configName, profileName, threshold.HoldOverTimeout, ptpStats[MasterClockType].Alias(), threshold.Close)
+
+				if syncState != ptpStats[master].LastSyncState() {
+					// Put master in HOLDOVER state
+					log.Infof("master process name %s and masteroffsetsource %s", ptpStats[master].ProcessName(), masterOffsetSource)
+					masterResource := fmt.Sprintf("%s/%s", alias, MasterClockType)
+					ptpStats[master].SetLastSyncState(syncState)
+					p.PublishEvent(syncState, ptpStats[master].LastOffset(), masterResource, ptp.PtpStateChange)
+
+					if ptpOpts, ok := p.PtpConfigMapUpdates.PtpProcessOpts[profileName]; ok && ptpOpts != nil {
+						p.maybePublishOSClockSyncStateChangeEvent(ptpOpts, configName, profileName)
+						threshold := p.PtpThreshold(profileName, true)
+						if p.mock {
+							log.Infof("mock holdover is set to %s", ptpStats[MasterClockType].Alias())
+						} else {
+							go handleHoldOverState(p, ptpOpts, configName, profileName, threshold.HoldOverTimeout, ptpStats[MasterClockType].Alias(), threshold.Close)
+						}
 					}
 				}
 			}
