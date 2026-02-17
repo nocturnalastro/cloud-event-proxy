@@ -191,6 +191,18 @@ func UpdatePTPOffsetMetrics(metricsType, process, eventResourceName string, offs
 		"process": process, "node": ptpNodeName, "iface": eventResourceName}).Set(offset)
 }
 
+// DeletePTPOffsetMetrics ... delete offset-related metrics (no sync state)
+func DeletePTPOffsetMetrics(metricsType, process, eventResourceName string) {
+	PtpOffset.Delete(prometheus.Labels{"from": metricsType,
+		"process": process, "node": ptpNodeName, "iface": eventResourceName})
+	PtpMaxOffset.Delete(prometheus.Labels{"from": metricsType,
+		"process": process, "node": ptpNodeName, "iface": eventResourceName})
+	PtpFrequencyAdjustment.Delete(prometheus.Labels{"from": metricsType,
+		"process": process, "node": ptpNodeName, "iface": eventResourceName})
+	PtpDelay.Delete(prometheus.Labels{"from": metricsType,
+		"process": process, "node": ptpNodeName, "iface": eventResourceName})
+}
+
 // DeletedPTPMetrics ... update metrics for deleted ptp config
 func DeletedPTPMetrics(clockType, processName, eventResourceName string) {
 	PtpOffset.Delete(prometheus.Labels{"from": clockType,
@@ -234,10 +246,22 @@ func UpdateSyncStateMetrics(process, iface string, state ptp.SyncState) {
 		"process": process, "node": ptpNodeName, "iface": iface}).Set(clockState)
 }
 
+// DeleteSyncStateMetrics ... delete sync state metrics
+func DeleteSyncStateMetrics(process, iface string) {
+	SyncState.Delete(prometheus.Labels{
+		"process": process, "node": ptpNodeName, "iface": iface})
+}
+
 // UpdateNmeaStatusMetrics ... update nmea status metrics
 func UpdateNmeaStatusMetrics(process, iface string, status float64) {
 	NmeaStatus.With(prometheus.Labels{
 		"process": process, "node": ptpNodeName, "iface": iface}).Set(status)
+}
+
+// DeleteNmeaStatusMetrics ... delete nmea status metrics
+func DeleteNmeaStatusMetrics(process, iface string) {
+	NmeaStatus.Delete(prometheus.Labels{
+		"process": process, "node": ptpNodeName, "iface": iface})
 }
 
 // UpdatePTPHaMetrics ... update ptp ha  status metrics
@@ -265,6 +289,12 @@ func DeleteInterfaceRoleMetrics(process, ptpInterface string) {
 func DeletePTPHAMetrics(profile string) {
 	PTPHAMetrics.Delete(prometheus.Labels{
 		"process": phc2sysProcessName, "node": ptpNodeName, "profile": profile})
+}
+
+// DeleteClockClassMetrics ... delete clock class metrics for config
+func DeleteClockClassMetrics(config string) {
+	ClockClassMetrics.Delete(prometheus.Labels{
+		"process": ptp4lProcessName, "config": config, "node": ptpNodeName})
 }
 
 // UpdateProcessStatusMetrics  -- update process status metrics

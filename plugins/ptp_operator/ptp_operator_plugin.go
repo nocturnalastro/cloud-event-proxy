@@ -38,7 +38,9 @@ import (
 	v2 "github.com/cloudevents/sdk-go/v2"
 	"github.com/redhat-cne/cloud-event-proxy/pkg/common"
 	ptpSocket "github.com/redhat-cne/cloud-event-proxy/plugins/ptp_operator/socket"
+	"github.com/redhat-cne/cloud-event-proxy/plugins/ptp_operator/stats"
 	ptpTypes "github.com/redhat-cne/cloud-event-proxy/plugins/ptp_operator/types"
+	"github.com/redhat-cne/cloud-event-proxy/plugins/ptp_operator/utils"
 	log "github.com/sirupsen/logrus"
 
 	ptpMetrics "github.com/redhat-cne/cloud-event-proxy/plugins/ptp_operator/metrics"
@@ -55,7 +57,12 @@ const (
 	ts2PhcProcessName  = "ts2phc"
 	chronydProcessName = "chronyd"
 	gnssProcessName    = "gnss"
+	dpllProcessName    = "dpll"
+	gmProcessName      = "GM"
+	tbcProcessName     = "T-BC"
 	syncE4lProcessName = "synce4l"
+	phcOffsetSource    = "phc"
+	sysOffsetSource    = "sys"
 	// ClockRealTime is the slave
 	ClockRealTime = "CLOCK_REALTIME"
 	// MasterClockType is the slave sync slave clock to master
@@ -394,20 +401,52 @@ func processPtp4lConfigFileUpdates() {
 				newInterfaces := ptpConfigEvent.GetAllInterface()
 				allSections := ptpConfigEvent.GetAllSections()
 				ptp4lConfig := eventManager.GetPTPConfig(ptpConfigFileName)
+				ptpStats := eventManager.GetStats(ptpConfigFileName)
 
-				if ptp4lConfig.Profile == "" {
-					ptp4lConfig.Profile = *ptpConfigEvent.Profile
+				oldProfile := ""
+				oldProfileType := ptp4lconf.PtpProfileType("")
+				var oldInterfaces []*ptp4lconf.PTPInterface
+				if ptp4lConfig != nil {
+					oldProfile = ptp4lConfig.Profile
+					oldProfileType = ptp4lConfig.ProfileType
+					oldInterfaces = append([]*ptp4lconf.PTPInterface(nil), ptp4lConfig.Interfaces...)
+				}
+
+				newProfile := oldProfile
+				if ptpConfigEvent.Profile != nil && *ptpConfigEvent.Profile != "" {
+					newProfile = *ptpConfigEvent.Profile
+				}
+
+				if ptp4lConfig == nil {
+					ptp4lConfig = &ptp4lconf.PTP4lConfig{Name: string(ptpConfigFileName)}
+				}
+				if newProfile != "" {
+					ptp4lConfig.Profile = newProfile
 				}
 				// if profile is not set then set it to default profile
 				ptp4lConfig.ProfileType = eventManager.GetProfileType(ptp4lConfig.Profile)
 
 				// loop through to find if any interface changed
-				if eventManager.Ptp4lConfigInterfaces[ptpConfigFileName] != nil &&
-					HasEqualInterface(newInterfaces, eventManager.Ptp4lConfigInterfaces[ptpConfigFileName].Interfaces) {
+				interfacesUnchanged := eventManager.Ptp4lConfigInterfaces[ptpConfigFileName] != nil &&
+					HasEqualInterface(newInterfaces, eventManager.Ptp4lConfigInterfaces[ptpConfigFileName].Interfaces)
+				profileChanged := oldProfile != "" && newProfile != "" && oldProfile != newProfile
+				profileTypeChanged := oldProfile != "" && newProfile != "" && oldProfileType != eventManager.GetProfileType(newProfile)
+				interfacesChanged := eventManager.Ptp4lConfigInterfaces[ptpConfigFileName] != nil && !interfacesUnchanged
+				if interfacesUnchanged && !profileChanged && !profileTypeChanged {
 					log.Infof("skipped update,interface not changed in ptl4lconfig")
 					// add to eventManager
 					eventManager.AddPTPConfig(ptpConfigFileName, ptp4lConfig)
 					continue
+				}
+
+				if profileChanged || profileTypeChanged || interfacesChanged {
+					oldConfigSnapshot := &ptp4lconf.PTP4lConfig{
+						Name:        string(ptpConfigFileName),
+						Profile:     oldProfile,
+						ProfileType: oldProfileType,
+						Interfaces:  oldInterfaces,
+					}
+					cleanupConfigMetrics(ptpConfigFileName, oldConfigSnapshot, ptpStats)
 				}
 
 				// cleanup functions to check if interface exists
@@ -538,6 +577,7 @@ func processPtp4lConfigFileUpdates() {
 				ptpStats := eventManager.GetStats(ptpConfigFileName)
 				// to avoid new one getting created , make a copy of this stats
 				ptpStats.SetConfigAsDeleted(true)
+				cleanupConfigMetrics(ptpConfigFileName, ptp4lConfig, ptpStats)
 				// there is a possibility of new config with same name is  created immediately after the delete of the old config.
 				// time="2024-03-19T19:40:16Z" level=info msg="config removed file: /var/run/phc2sys.2.config"
 				// time="2024-03-19T19:40:16Z" level=info msg="updating ptp config changes for phc2sys.2.config"
@@ -676,6 +716,74 @@ func processMessages(c net.Conn) {
 		}
 		msg := scanner.Text()
 		eventManager.ExtractMetrics(msg)
+	}
+}
+
+func cleanupConfigMetrics(ptpConfigFileName ptpTypes.ConfigName, ptpConfig *ptp4lconf.PTP4lConfig, ptpStats stats.PTPStats) {
+	if ptpConfig == nil {
+		return
+	}
+	nodeName := eventManager.NodeName()
+	ifaceSet := map[string]struct{}{}
+	for _, ptpInterface := range ptpConfig.Interfaces {
+		if ptpInterface == nil || ptpInterface.Name == "" {
+			continue
+		}
+		ifaceSet[ptpInterface.Name] = struct{}{}
+		alias := utils.GetAlias(ptpInterface.Name)
+		if alias != "" {
+			ifaceSet[alias] = struct{}{}
+		}
+	}
+
+	offsetLabelPairs := []struct {
+		from    string
+		process string
+	}{
+		{MasterClockType, ptp4lProcessName},
+		{MasterClockType, ts2PhcProcessName},
+		{phcOffsetSource, phc2sysProcessName},
+		{sysOffsetSource, phc2sysProcessName},
+		{tbcProcessName, tbcProcessName},
+	}
+	syncStateProcesses := []string{
+		ptp4lProcessName,
+		phc2sysProcessName,
+		ts2PhcProcessName,
+		tbcProcessName,
+		dpllProcessName,
+		gnssProcessName,
+		gmProcessName,
+		syncE4lProcessName,
+	}
+
+	for iface := range ifaceSet {
+		ptpMetrics.DeleteInterfaceRoleMetrics(ptp4lProcessName, iface)
+		for _, process := range syncStateProcesses {
+			ptpMetrics.DeleteSyncStateMetrics(process, iface)
+			ptpMetrics.DeleteNmeaStatusMetrics(process, iface)
+		}
+		for _, labelPair := range offsetLabelPairs {
+			ptpMetrics.DeletePTPOffsetMetrics(labelPair.from, labelPair.process, iface)
+		}
+	}
+
+	ptpMetrics.DeleteClockClassMetrics(string(ptpConfigFileName))
+
+	ptpMetrics.DeleteProcessStatusMetricsForConfig(nodeName, string(ptpConfigFileName), ptp4lProcessName, phc2sysProcessName, syncE4lProcessName)
+	ptpMetrics.DeleteProcessStatusMetricsForConfig(nodeName, strings.Replace(string(ptpConfigFileName), ptp4lProcessName, ts2PhcProcessName, 1), ts2PhcProcessName)
+	ptpMetrics.DeleteProcessStatusMetricsForConfig(nodeName, strings.Replace(string(ptpConfigFileName), ptp4lProcessName, chronydProcessName, 1), chronydProcessName)
+
+	ptpMetrics.DeleteThresholdMetrics(ptpConfig.Profile)
+	ptpMetrics.DeletePTPHAMetrics(ptpConfig.Profile)
+
+	for _, s := range ptpStats {
+		if s != nil && s.GetSyncE() != nil {
+			ptpMetrics.DeleteSyncEMetrics(syncE4lProcessName, string(ptpConfigFileName), *s.GetSyncE())
+		}
+		if s != nil {
+			s.DeleteAllMetrics([]*prometheus.GaugeVec{ptpMetrics.PtpOffset, ptpMetrics.SyncState})
+		}
 	}
 }
 
